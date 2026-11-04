@@ -48,3 +48,4 @@ class AuditAction(str, Enum):
     TASK_COMPLETE = "task_complete"
     ROLLBACK_TRIGGERED = "rollback_triggered"
     ERROR_DETECTED = "error_detected"
+

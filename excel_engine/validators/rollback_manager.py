@@ -38,3 +38,4 @@ class RollbackManager:
             return False, "Failed to restore working copy accurately"
 
         return True, "Workbook successfully rolled back to pre-execution state"
+

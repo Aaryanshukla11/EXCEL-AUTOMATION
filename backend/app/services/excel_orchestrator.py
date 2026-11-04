@@ -50,16 +50,15 @@ class ExcelOrchestrator:
         self,
         source_filepath: str,
         master_filepath: str,
-        summary_sheet_name: Optional[str] = "Incentive II Summary Sheet"
-    ) -> Tuple[MappingPlan, EntityMatchProposal, List[ExecutionStepLog]]:
+        summary_sheet_name: Optional[str] = None
+    ) -> Tuple[Optional[MappingPlan], EntityMatchProposal, List[ExecutionStepLog]]:
         """Stage 1: Discover structure, match entity, and formulate mapping plan."""
         audit_logs: List[ExecutionStepLog] = []
         task_id = str(uuid.uuid4())[:8]
 
-        # Step 1: Inspect Source File
+        # Step 1: Inspect Source File - Dynamically discover primary claim sheet
         src_inspector = WorkbookInspector(source_filepath)
-        src_sheets = src_inspector.get_sheet_names()
-        primary_src_sheet = src_sheets[0]
+        primary_src_sheet = src_inspector.discover_primary_data_sheet()
 
         src_meta = src_inspector.inspect_metadata_block(primary_src_sheet)
         src_region = src_inspector.discover_table_region(primary_src_sheet)
@@ -68,18 +67,19 @@ class ExcelOrchestrator:
             step_number=1,
             action=AuditAction.STRUCTURE_INSPECT,
             status="SUCCESS",
-            description=f"Inspected source file. Identified entity: ID={src_meta.entity_id}, Name={src_meta.entity_name}",
+            description=f"Inspected source file. Primary sheet: '{primary_src_sheet}', Identified entity: ID={src_meta.entity_id}, Name={src_meta.entity_name}",
             details={"metadata": src_meta.model_dump(), "source_sheet": primary_src_sheet}
         ))
 
-        # Step 2: Inspect Master Workbook
+        # Step 2: Inspect Master Workbook - Dynamically discover summary sheet if not given
         mst_inspector = WorkbookInspector(master_filepath)
         mst_sheets = mst_inspector.get_sheet_names()
 
-        # Extract Summary linkages if summary sheet is available
+        discovered_summary_sheet = summary_sheet_name or mst_inspector.discover_summary_sheet()
+
         linkages = []
-        if summary_sheet_name and summary_sheet_name in mst_sheets:
-            linkages = mst_inspector.extract_formula_linkages_from_summary(summary_sheet_name)
+        if discovered_summary_sheet and discovered_summary_sheet in mst_sheets:
+            linkages = mst_inspector.extract_formula_linkages_from_summary(discovered_summary_sheet)
 
         # Match entity to destination sheet
         match_proposals = self.matcher.match(
@@ -88,7 +88,19 @@ class ExcelOrchestrator:
             summary_linkages=linkages
         )
 
-        best_proposal = match_proposals[0]
+        best_proposal = match_proposals[0] if match_proposals else None
+
+        # Check for Missing Destination Sheet (e.g. Kanupriya case where no sheet exists)
+        if not best_proposal or best_proposal.confidence_level == MatchConfidenceLevel.LOW:
+            audit_logs.append(ExecutionStepLog(
+                step_number=2,
+                action=AuditAction.ENTITY_MATCH,
+                status="WARNING",
+                description=f"No high-confidence destination worksheet found for {src_meta.entity_name} (ID: {src_meta.entity_id}). Requires user selection or sheet creation.",
+                details={"best_guess": best_proposal.candidate_sheet_name if best_proposal else None, "score": best_proposal.confidence_score if best_proposal else 0.0}
+            ))
+            return None, best_proposal, audit_logs
+
         audit_logs.append(ExecutionStepLog(
             step_number=2,
             action=AuditAction.ENTITY_MATCH,

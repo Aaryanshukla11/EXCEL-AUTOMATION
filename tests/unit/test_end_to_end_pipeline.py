@@ -83,3 +83,4 @@ def test_full_pipeline_preserves_master_integrity():
     # Clean up test temp run
     if os.path.exists(temp_test_dir):
         shutil.rmtree(temp_test_dir)
+

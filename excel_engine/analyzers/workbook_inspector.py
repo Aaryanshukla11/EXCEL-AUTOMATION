@@ -7,6 +7,7 @@ and cross-sheet dependency relationships.
 import re
 import zipfile
 import xml.etree.ElementTree as ET
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 import openpyxl
 from openpyxl.utils import get_column_letter
@@ -51,11 +52,64 @@ class WorkbookInspector:
                     return target
         raise ValueError(f"Sheet '{sheet_name}' not found in workbook {self.filepath}")
 
-    def inspect_metadata_block(self, sheet_name: str, max_search_rows: int = 6) -> EntityMetadata:
-        """Dynamically detect key-value metadata pairs in the top rows of a sheet.
+    def discover_primary_data_sheet(self) -> str:
+        """Dynamically identifies the primary transaction/data sheet in a multi-sheet workbook.
         
-        Matches patterns like 'EMP. NAME: Gagan', 'Employee ID: APL2004', 'ID: 1234',
-        'TL: John', 'Manager: Jane', etc.
+        Evaluates candidate sheets across the workbook and scores metadata presence
+        and record density. Solves multi-sheet files (e.g. Krishika Kataria) without hardcoding.
+        """
+        sheet_names = self.get_sheet_names()
+        if len(sheet_names) == 1:
+            return sheet_names[0]
+
+        scored_candidates = []
+        for s_name in sheet_names:
+            score = 0
+            # Inspect metadata block
+            meta = self.inspect_metadata_block(s_name)
+            # Valid entity ID must be an alphanumeric identifier code, not a date or phrase
+            if meta.entity_id and re.match(r'^[A-Za-z0-9\s_-]{2,15}$', str(meta.entity_id)):
+                score += 60
+            if meta.entity_name and len(str(meta.entity_name)) > 2:
+                score += 40
+
+            # Discover table region
+            region = self.discover_table_region(s_name)
+            if region:
+                row_count = region.data_end_row - region.data_start_row + 1
+                col_count = len(region.columns)
+                score += min(row_count * 2, 20) + min(col_count * 2, 20)
+
+            scored_candidates.append((s_name, score))
+
+        scored_candidates.sort(key=lambda x: x[1], reverse=True)
+        return scored_candidates[0][0]
+
+    def discover_summary_sheet(self) -> Optional[str]:
+        """Dynamically discovers summary/roster sheets in a Master workbook.
+        
+        Scans sheet names for summary/roster keywords and checks for cross-sheet formula links.
+        Eliminates hardcoded summary sheet names.
+        """
+        sheet_names = self.get_sheet_names()
+        candidate_keywords = ["summary", "roster", "master", "overview", "payout", "team"]
+
+        for s_name in sheet_names:
+            norm = s_name.lower()
+            if any(kw in norm for kw in candidate_keywords):
+                try:
+                    links = self.extract_formula_linkages_from_summary(s_name)
+                    if len(links) >= 3:
+                        return s_name
+                except Exception:
+                    pass
+
+        return None
+
+    def inspect_metadata_block(self, sheet_name: str, max_search_rows: int = 6) -> EntityMetadata:
+        """Dynamically detect key-value metadata pairs in top rows of any sheet.
+        
+        Distinguishes key-value pairs (1-3 cells in row) from table headers (5+ cells in row).
         """
         wb = openpyxl.load_workbook(self.filepath, read_only=True, data_only=True)
         ws = wb[sheet_name]
@@ -66,34 +120,41 @@ class WorkbookInspector:
         entity_name = None
         supervisor_name = None
 
-        id_patterns = [r'emp.*id', r'employee.*id', r'staff.*id', r'id', r'code']
-        name_patterns = [r'emp.*name', r'employee.*name', r'counsellor.*name', r'name']
-        manager_patterns = [r'am.*name', r'tl.*name', r'manager', r'team.*leader', r'supervisor']
+        id_patterns = [r'\bemp[\.\s_-]*id\b', r'\bemployee[\.\s_-]*id\b', r'\bstaff[\.\s_-]*id\b', r'\bclient[\.\s_-]*id\b', r'\bvendor[\.\s_-]*id\b', r'\bcode\b']
+        name_patterns = [r'\bemp[\.\s_-]*name\b', r'\bemployee[\.\s_-]*name\b', r'\bcounsellor[\.\s_-]*name\b', r'\bclient[\.\s_-]*name\b', r'\bperson[\.\s_-]*name\b']
+        manager_patterns = [r'\bam[\.\s_-]*name\b', r'\btl[\.\s_-]*name\b', r'\bmanager\b', r'\bteam[\.\s_-]*leader\b', r'\bsupervisor\b']
 
         for r in range(1, max_search_rows + 1):
             row_cells = []
             for c in range(1, 15):
                 val = ws.cell(r, c).value
-                if val is not None:
+                if val is not None and not isinstance(val, datetime):
                     row_cells.append((c, str(val).strip()))
+
+            # If a row has >= 5 cells, it is likely a tabular data header, not a key-value metadata row!
+            if len(row_cells) >= 5:
+                continue
 
             for i, (col_idx, text) in enumerate(row_cells):
                 norm_text = text.lower()
                 next_val = row_cells[i + 1][1] if i + 1 < len(row_cells) else None
 
+                if not next_val or isinstance(next_val, datetime):
+                    continue
+
                 # 1. Entity ID
                 if any(re.search(pat, norm_text) for pat in id_patterns):
-                    if next_val and not entity_id:
+                    if not entity_id and re.match(r'^[A-Za-z0-9\s_-]+$', next_val):
                         entity_id = next_val
                         raw_cells["entity_id"] = f"{get_column_letter(row_cells[i+1][0])}{r}"
                 # 2. Entity Name
                 elif any(re.search(pat, norm_text) for pat in name_patterns):
-                    if next_val and not entity_name:
+                    if not entity_name:
                         entity_name = next_val
                         raw_cells["entity_name"] = f"{get_column_letter(row_cells[i+1][0])}{r}"
                 # 3. Supervisor Name
                 elif any(re.search(pat, norm_text) for pat in manager_patterns):
-                    if next_val and not supervisor_name:
+                    if not supervisor_name:
                         supervisor_name = next_val
                         raw_cells[text] = f"{get_column_letter(row_cells[i+1][0])}{r}"
                 elif next_val:
@@ -117,7 +178,6 @@ class WorkbookInspector:
         sheet_path = self.get_sheet_target_path(sheet_name)
         with zipfile.ZipFile(self.filepath, 'r') as z:
             sheet_bytes = z.read(sheet_path)
-            # Check for shared strings
             shared_strings = []
             if 'xl/sharedStrings.xml' in z.namelist():
                 ss_root = ET.fromstring(z.read('xl/sharedStrings.xml'))
@@ -127,7 +187,6 @@ class WorkbookInspector:
         root = ET.fromstring(sheet_bytes)
         sheet_data = root.find(f"{{{NS['main']}}}sheetData")
 
-        # Parse rows and cells
         rows: Dict[int, Dict[int, Tuple[Optional[str], Optional[str]]]] = {}
         for row_elem in sheet_data.findall(f"{{{NS['main']}}}row"):
             r_idx = int(row_elem.attrib.get('r', 0))
@@ -138,7 +197,6 @@ class WorkbookInspector:
                 if not col_match:
                     continue
                 col_letters = col_match.group(1)
-                # Convert letter to 1-based index
                 c_idx = 0
                 for char in col_letters:
                     c_idx = c_idx * 26 + (ord(char) - ord('A') + 1)
@@ -154,7 +212,7 @@ class WorkbookInspector:
                     val = t_el.text if t_el is not None else None
                 elif v_el is not None:
                     val = v_el.text
-                    if t == 's' and val is not None:
+                    if t == 's' and val is not None and int(val) < len(shared_strings):
                         val = shared_strings[int(val)]
 
                 formula = f_el.text if f_el is not None else None
@@ -175,7 +233,7 @@ class WorkbookInspector:
                     distinct_names.append(val.strip())
 
             if text_cells >= 4:
-                keywords = ["name", "date", "id", "amount", "no", "product", "price", "status", "sale", "collection", "total"]
+                keywords = ["name", "date", "id", "amount", "no", "product", "price", "status", "sale", "collection", "total", "code", "type", "qty", "rate", "value", "desc", "item", "num", "ref"]
                 score = sum(1 for w in distinct_names if any(k in w.lower() for k in keywords))
                 candidate_rows.append((r, score, text_cells))
 
@@ -195,7 +253,6 @@ class WorkbookInspector:
                 col_letter = get_column_letter(c_idx)
                 norm_name = re.sub(r'[^a-zA-Z0-9]', '_', name.lower()).strip('_')
 
-                # Check downstream rows (header_row+1 to header_row+5) for formulas
                 sample_formula = None
                 has_formula = False
                 for test_r in range(header_row + 1, min(header_row + 6, max(rows.keys(), default=header_row) + 1)):
@@ -303,7 +360,7 @@ class WorkbookInspector:
                     val = t_el.text if t_el is not None else ""
                 elif v_el is not None:
                     val = v_el.text or ""
-                    if t == 's' and val:
+                    if t == 's' and val and int(val) < len(shared_strings):
                         val = shared_strings[int(val)]
 
                 formula = (f_el.text if f_el is not None else None) or ""
