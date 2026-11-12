@@ -146,3 +146,40 @@ def test_simulated_corruption_triggers_rollback():
     # Clean up test temp run
     if os.path.exists(temp_dir):
         shutil.rmtree(temp_dir)
+
+
+def test_diagnostic_gagan_destination_structure_and_placeholders():
+    """Diagnostic: Verify Gagan destination sheet rows 6-25 define pre-allocated slots."""
+    insp = WorkbookInspector(MASTER_SRC)
+    reg = insp.discover_table_region("Gagan")
+    assert reg.header_row == 5
+    assert reg.totals_row == 26
+    # Preallocated slot band between header (row 5) and totals anchor (row 26) is 20 rows
+    assert reg.totals_row - reg.header_row - 1 == 20
+
+
+def test_diagnostic_gagan_sister_columns_distinction():
+    """Diagnostic: Verify Gagan sister file has distinct List Price vs Invoiced vs Accounts Verified columns."""
+    src_file = os.path.join(FIXTURES_DIR, "Gagan Godha - APL2004- Oct_2026.xlsx")
+    insp_s = WorkbookInspector(src_file)
+    reg_s = insp_s.discover_table_region("Sheet1")
+    col_names = [c.name for c in reg_s.columns]
+    
+    assert "Actual Price" in col_names
+    assert "SALE AMT.(Invoice Amount)" in col_names
+    assert "Overall" in col_names
+
+
+def test_diagnostic_salary_column_distinction():
+    """Diagnostic: Verify destination Col S is distinct from Col R (Collection for Incentive)."""
+    insp_m = WorkbookInspector(MASTER_SRC)
+    reg_m = insp_m.discover_table_region("Gagan")
+    
+    col_r = next((c for c in reg_m.columns if c.column_letter == "R"), None)
+    col_s = next((c for c in reg_m.columns if c.column_letter == "S"), None)
+    
+    assert col_r is not None
+    assert col_s is not None
+    assert "salary" in col_s.normalized_name
+    assert "salary" not in col_r.normalized_name
+
