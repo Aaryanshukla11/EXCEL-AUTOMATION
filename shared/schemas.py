@@ -71,6 +71,8 @@ class ColumnMappingRule(BaseModel):
     transformation_rule: Optional[str] = None
     is_formula_column: bool = False
     confidence: float = 1.0
+    is_ambiguous: bool = False
+    ambiguity_reason: Optional[str] = None
 
 
 class ExecutionStepLog(BaseModel):
@@ -94,6 +96,8 @@ class MappingPlan(BaseModel):
     target_start_row: int
     requires_approval: bool
     status: TaskStatus = TaskStatus.PENDING
+    unmapped_source_columns: List[str] = Field(default_factory=list)
+    ambiguities: List[str] = Field(default_factory=list)
 
 
 class ValidationResult(BaseModel):

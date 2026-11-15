@@ -101,7 +101,18 @@ def main():
     print("-" * 90)
     for m in plan.column_mappings:
         role_str = "FORMULA (SHIELD)" if m.is_formula_column else "Input Value"
-        print(f"{m.source_column:<30} -> {m.destination_column:<35} {m.destination_column_letter:<5} {role_str:<15} {m.confidence * 100:.0f}%")
+        ambig_str = f" [!] {m.ambiguity_reason}" if m.is_ambiguous else ""
+        print(f"{m.source_column:<30} -> {m.destination_column:<35} {m.destination_column_letter:<5} {role_str:<15} {m.confidence * 100:.0f}%{ambig_str}")
+
+    if plan.unmapped_source_columns:
+        print(f"\n--- UNMAPPED SOURCE COLUMNS (HELD FROM TRANSFER) ---")
+        for u in plan.unmapped_source_columns:
+            print(f"  - {u}")
+
+    if plan.ambiguities:
+        print(f"\n--- DETECTED AMBIGUITIES / COMPETING FIELDS ---")
+        for amb in plan.ambiguities:
+            print(f"  - [WARNING] {amb}")
 
     print(f"\n--- DESTINATION SLOT AVAILABILITY ---")
     print(f"  Available Pre-allocated Empty Slots: {len(plan.destination_region.available_empty_slots)} rows")
@@ -154,3 +165,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

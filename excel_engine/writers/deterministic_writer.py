@@ -131,7 +131,11 @@ class DeterministicWriter:
         cell_diffs = []
 
         for record_idx, rec_data in enumerate(source_records):
-            dest_row = empty_slots[record_idx] if record_idx < len(empty_slots) else (destination_region.data_start_row + record_idx)
+            dest_row = (
+                empty_slots[record_idx]
+                if record_idx < len(empty_slots)
+                else (destination_region.data_end_row + 1 + (record_idx - len(empty_slots)))
+            )
             
             # Find or create row element
             if dest_row in existing_rows:

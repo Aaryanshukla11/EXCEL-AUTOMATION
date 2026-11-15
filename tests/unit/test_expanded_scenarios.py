@@ -149,37 +149,93 @@ def test_simulated_corruption_triggers_rollback():
 
 
 def test_diagnostic_gagan_destination_structure_and_placeholders():
-    """Diagnostic: Verify Gagan destination sheet rows 6-25 define pre-allocated slots."""
+    """Diagnostic & Regression: Verify Gagan destination sheet rows 6-25 dynamically recognized as 20 empty slots."""
     insp = WorkbookInspector(MASTER_SRC)
     reg = insp.discover_table_region("Gagan")
     assert reg.header_row == 5
     assert reg.totals_row == 26
-    # Preallocated slot band between header (row 5) and totals anchor (row 26) is 20 rows
-    assert reg.totals_row - reg.header_row - 1 == 20
+    # 20 preallocated slots detected dynamically despite template defaults "No" and "NA"
+    assert len(reg.available_empty_slots) == 20
+    assert reg.available_empty_slots == list(range(6, 26))
+    assert reg.preallocated_slots_count == 20
 
 
 def test_diagnostic_gagan_sister_columns_distinction():
-    """Diagnostic: Verify Gagan sister file has distinct List Price vs Invoiced vs Accounts Verified columns."""
+    """Diagnostic & Regression: Verify exact header priority for Invoice Amount over Actual Price."""
     src_file = os.path.join(FIXTURES_DIR, "Gagan Godha - APL2004- Oct_2026.xlsx")
     insp_s = WorkbookInspector(src_file)
     reg_s = insp_s.discover_table_region("Sheet1")
-    col_names = [c.name for c in reg_s.columns]
+    insp_m = WorkbookInspector(MASTER_SRC)
+    reg_m = insp_m.discover_table_region("Gagan")
+
+    mapper = SchemaMapper()
+    mappings = mapper.generate_mapping(reg_s, reg_m)
+
+    mapped_dict = {m.destination_column_letter: m.source_column for m in mappings}
     
-    assert "Actual Price" in col_names
-    assert "SALE AMT.(Invoice Amount)" in col_names
-    assert "Overall" in col_names
+    # Col J must be mapped to exact match 'SALE AMT.(Invoice Amount)', NEVER 'Actual Price'
+    assert mapped_dict.get("J") == "SALE AMT.(Invoice Amount)"
+    assert "Actual Price" in mapper.last_unmapped_columns
 
 
 def test_diagnostic_salary_column_distinction():
-    """Diagnostic: Verify destination Col S is distinct from Col R (Collection for Incentive)."""
+    """Diagnostic & Regression: Verify Column S (Salary On Total Collection) is strictly shielded."""
+    src_file = os.path.join(FIXTURES_DIR, "Gagan Godha - APL2004- Oct_2026.xlsx")
+    insp_s = WorkbookInspector(src_file)
+    reg_s = insp_s.discover_table_region("Sheet1")
     insp_m = WorkbookInspector(MASTER_SRC)
     reg_m = insp_m.discover_table_region("Gagan")
-    
-    col_r = next((c for c in reg_m.columns if c.column_letter == "R"), None)
-    col_s = next((c for c in reg_m.columns if c.column_letter == "S"), None)
-    
-    assert col_r is not None
-    assert col_s is not None
-    assert "salary" in col_s.normalized_name
-    assert "salary" not in col_r.normalized_name
+
+    mapper = SchemaMapper()
+    mappings = mapper.generate_mapping(reg_s, reg_m)
+
+    dest_letters = [m.destination_column_letter for m in mappings]
+    dest_names = [m.destination_column.lower() for m in mappings]
+
+    # Destination Col S must NEVER receive transaction collections
+    assert "S" not in dest_letters
+    assert not any("salary" in name for name in dest_names)
+
+
+def test_regression_mapping_uniqueness_and_competing_fields():
+    """Regression: Verify 1-to-1 uniqueness and detection of competing source fields."""
+    src_file = os.path.join(FIXTURES_DIR, "Gagan Godha - APL2004- Oct_2026.xlsx")
+    insp_s = WorkbookInspector(src_file)
+    reg_s = insp_s.discover_table_region("Sheet1")
+    insp_m = WorkbookInspector(MASTER_SRC)
+    reg_m = insp_m.discover_table_region("Gagan")
+
+    mapper = SchemaMapper()
+    mappings = mapper.generate_mapping(reg_s, reg_m)
+
+    dest_indices = [m.destination_index for m in mappings]
+    assert len(dest_indices) == len(set(dest_indices)), "Destination indices must be strictly unique"
+
+    # Multiple source columns named COLLECTION AMT. must trigger ambiguity notification
+    assert len(mapper.last_ambiguities) > 0
+    assert any("compete" in a.lower() for a in mapper.last_ambiguities)
+
+
+def test_regression_arshad_and_chirag_mapping_integrity():
+    """Regression: Verify Arshad (16-col) and Chirag (13-col) map cleanly with Column S shielded."""
+    for sister_name, target_sheet in [
+        ("Arshad - APL 1695 - Oct 2026.xlsx", "Mohmmad Arshad RSD"),
+        ("Chirag Singh- APL2056- Oct_2026.xlsx", "Chirag")
+    ]:
+        src_file = os.path.join(FIXTURES_DIR, sister_name)
+        reg_s = WorkbookInspector(src_file).discover_table_region("Sheet1")
+        reg_m = WorkbookInspector(MASTER_SRC).discover_table_region(target_sheet)
+
+        mapper = SchemaMapper()
+        mappings = mapper.generate_mapping(reg_s, reg_m)
+
+        mapped_dict = {m.destination_column_letter: m.source_column for m in mappings}
+        
+        # Col J must be Invoice Amount
+        assert "Invoice Amount" in mapped_dict.get("J", "")
+        # Col S must not be mapped
+        assert "S" not in mapped_dict
+        # Actual Price must not be mapped to Col J
+        assert mapped_dict.get("J") != "Actual Price"
+
 

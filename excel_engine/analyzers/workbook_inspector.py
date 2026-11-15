@@ -169,6 +169,24 @@ class WorkbookInspector:
             raw_source_cells=raw_cells,
         )
 
+    TEMPLATE_PLACEHOLDER_VALUES = {
+        "no", "na", "n/a", "-", "--", "none", "null", "false", "0", "0.0",
+        "n.a", "n.a.", "#n/a", "#div/0!", "#value!", "#ref!", "#name?", "#num!", "#null!", "not applicable"
+    }
+
+    @staticmethod
+    def is_primary_identity_column(col_name: str) -> bool:
+        """Determines if a column is a primary transactional identity column."""
+        norm = re.sub(r'[^a-z0-9]', '_', col_name.lower()).strip('_')
+        primary_indicators = [
+            "name", "customer", "contact", "candidate", "client", "person", "student", "employee",
+            "date", "inv_no", "invoice", "wo_id", "order_id", "pi_no", "bill_no"
+        ]
+        # Ignore secondary lookup or status columns
+        if any(sec in norm for sec in ["status", "grid", "target", "matrix", "remark", "as_per"]):
+            return False
+        return any(ind in norm for ind in primary_indicators)
+
     def discover_table_region(self, sheet_name: str, max_scan_rows: int = 35) -> Optional[DataRegion]:
         """Dynamically locate the primary data table, headers, data slots, and summary row.
         
@@ -264,7 +282,7 @@ class WorkbookInspector:
                             break
 
                 role = ColumnRole.CALCULATED_FORMULA if has_formula else ColumnRole.INPUT_VALUE
-                if "s_no" in norm_name or "sno" in norm_name:
+                if norm_name in ("s_no", "sno", "sr_no", "serial_no", "sl_no") or norm_name.startswith(("s_no_", "sr_no_")):
                     role = ColumnRole.INDEX_SEQUENCE
 
                 columns.append(ColumnHeader(
@@ -284,7 +302,7 @@ class WorkbookInspector:
         current_data_end = header_row
 
         max_row_in_sheet = max(rows.keys(), default=header_row)
-        for r in range(data_start_row, min(max_row_in_sheet + 1, header_row + 60)):
+        for r in range(data_start_row, min(max_row_in_sheet + 1, header_row + 100)):
             if r not in rows:
                 empty_slots.append(r)
                 continue
@@ -298,19 +316,37 @@ class WorkbookInspector:
                 totals_row = r
                 break
 
-            input_cols_empty = True
-            has_any_content = False
+            # Distinguish genuine user transaction records from default template slots
+            has_primary_identity = False
+            non_placeholder_count = 0
+
             for col in columns:
+                # Formula columns, totals, and index sequences are not user-entered transaction records
+                if col.role in (ColumnRole.CALCULATED_FORMULA, ColumnRole.TOTAL_AGGREGATE, ColumnRole.INDEX_SEQUENCE):
+                    continue
+
                 if col.index in r_cells:
                     v, f = r_cells[col.index]
-                    if v is not None or f is not None:
-                        has_any_content = True
-                        if col.role == ColumnRole.INPUT_VALUE and v is not None and str(v).strip():
-                            input_cols_empty = False
+                    # Formulas are dormant calculation slots, not user-entered data records
+                    if f is not None:
+                        continue
+                    if v is not None:
+                        v_str = str(v).strip()
+                        if not v_str:
+                            continue
+                        is_placeholder = v_str.lower() in self.TEMPLATE_PLACEHOLDER_VALUES
+                        if not is_placeholder:
+                            non_placeholder_count += 1
+                            if self.is_primary_identity_column(col.name):
+                                has_primary_identity = True
 
-            if has_any_content and not input_cols_empty:
+            # An occupied transaction row has either a valid primary identity (name, date, invoice)
+            # or multiple distinct non-placeholder inputs.
+            is_occupied_record = has_primary_identity or (non_placeholder_count >= 2)
+
+            if is_occupied_record:
                 current_data_end = r
-            elif input_cols_empty:
+            else:
                 empty_slots.append(r)
 
         data_end_row = totals_row - 1 if totals_row else max(current_data_end, header_row + 1)

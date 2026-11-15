@@ -120,13 +120,29 @@ class ExcelOrchestrator:
 
         # Step 4: Generate Semantic Schema Mapping
         mappings = self.schema_mapper.generate_mapping(src_region, dest_region)
+        unmapped = getattr(self.schema_mapper, "last_unmapped_columns", [])
+        ambiguities = getattr(self.schema_mapper, "last_ambiguities", [])
+
         audit_logs.append(ExecutionStepLog(
             step_number=3,
             action=AuditAction.SCHEMA_MAP,
-            status="SUCCESS",
-            description=f"Generated {len(mappings)} semantic column mappings",
-            details={"mapped_columns": [m.model_dump() for m in mappings]}
+            status="SUCCESS" if not ambiguities else "WARNING",
+            description=f"Generated {len(mappings)} semantic column mappings" + (f" with {len(ambiguities)} ambiguities" if ambiguities else ""),
+            details={
+                "mapped_columns": [m.model_dump() for m in mappings],
+                "unmapped_source_columns": unmapped,
+                "ambiguities": ambiguities
+            }
         ))
+
+        # Target start row: use first preallocated empty slot if available, else append at data_end_row + 1
+        target_start_row = (
+            dest_region.available_empty_slots[0]
+            if dest_region.available_empty_slots
+            else (dest_region.data_end_row + 1)
+        )
+
+        has_unresolved_issues = bool(ambiguities) or best_proposal.requires_human_approval
 
         plan = MappingPlan(
             plan_id=task_id,
@@ -137,9 +153,11 @@ class ExcelOrchestrator:
             destination_region=dest_region,
             column_mappings=mappings,
             rows_to_transfer=src_region.data_end_row - src_region.data_start_row + 1,
-            target_start_row=dest_region.data_start_row,
-            requires_approval=best_proposal.requires_human_approval or (self.execution_mode != ExecutionMode.AUTONOMOUS),
-            status=TaskStatus.AWAITING_APPROVAL if best_proposal.requires_human_approval else TaskStatus.PENDING
+            target_start_row=target_start_row,
+            requires_approval=has_unresolved_issues or (self.execution_mode != ExecutionMode.AUTONOMOUS),
+            status=TaskStatus.AWAITING_APPROVAL if has_unresolved_issues else TaskStatus.PENDING,
+            unmapped_source_columns=unmapped,
+            ambiguities=ambiguities
         )
 
         return plan, best_proposal, audit_logs
