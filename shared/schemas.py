@@ -31,6 +31,8 @@ class ColumnHeader(BaseModel):
     role: ColumnRole = ColumnRole.INPUT_VALUE
     sample_formula: Optional[str] = None
     has_formula_slots: bool = False
+    section: Optional[str] = None
+    is_verified_section: bool = False
 
 
 class DataRegion(BaseModel):
@@ -73,6 +75,9 @@ class ColumnMappingRule(BaseModel):
     confidence: float = 1.0
     is_ambiguous: bool = False
     ambiguity_reason: Optional[str] = None
+    section_context: Optional[str] = None
+    source_cell_references: Optional[str] = None
+    is_verified_source: bool = False
 
 
 class ExecutionStepLog(BaseModel):
@@ -98,6 +103,8 @@ class MappingPlan(BaseModel):
     status: TaskStatus = TaskStatus.PENDING
     unmapped_source_columns: List[str] = Field(default_factory=list)
     ambiguities: List[str] = Field(default_factory=list)
+    product_normalization_details: Dict[str, Any] = Field(default_factory=dict)
+    mirror_columns_observation: Dict[str, str] = Field(default_factory=dict)
 
 
 class ValidationResult(BaseModel):

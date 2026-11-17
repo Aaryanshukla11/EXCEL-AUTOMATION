@@ -7,14 +7,16 @@ import os
 import shutil
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
+import openpyxl
 
 from excel_engine.analyzers.workbook_inspector import WorkbookInspector
 from excel_engine.mappers.entity_matcher import EntityMatcher
 from excel_engine.mappers.schema_mapper import SchemaMapper
+from excel_engine.mappers.product_normalizer import ProductNormalizer
 from excel_engine.validators.integrity_validator import IntegrityValidator
 from excel_engine.validators.rollback_manager import RollbackManager
 from excel_engine.writers.deterministic_writer import DeterministicWriter
-from shared.enums import AuditAction, ExecutionMode, MatchConfidenceLevel, TaskStatus
+from shared.enums import AuditAction, ExecutionMode, MatchConfidenceLevel, TaskStatus, ColumnRole
 from shared.schemas import (
     EntityMatchProposal,
     ExecutionStepLog,
@@ -113,15 +115,59 @@ class ExcelOrchestrator:
             }
         ))
 
-        # Step 3: Inspect Destination Sheet Structure
+        # Step 3: Inspect Destination Sheet Structure & Discovered Reference Grids
         dest_region = mst_inspector.discover_table_region(best_proposal.candidate_sheet_name)
         if not dest_region:
             raise ValueError(f"Could not discover tabular data region in destination sheet '{best_proposal.candidate_sheet_name}'")
 
-        # Step 4: Generate Semantic Schema Mapping
-        mappings = self.schema_mapper.generate_mapping(src_region, dest_region)
+        # Discover authoritative product lookup grid from Incentive Plan sheet (Rule 2)
+        product_grid = mst_inspector.discover_product_lookup_grid()
+        self.schema_mapper.product_grid = product_grid
+        self.schema_mapper.product_normalizer = ProductNormalizer(product_grid) if product_grid else None
+
+        # Sample raw product name from source for normalization resolution
+        sample_product = None
+        src_prod_col = next((c for c in src_region.columns if "product" in c.normalized_name), None)
+        if src_prod_col:
+            wb_temp = openpyxl.load_workbook(source_filepath, data_only=True)
+            ws_temp = wb_temp[src_region.sheet_name]
+            for r in range(src_region.data_start_row, min(src_region.data_start_row + 3, src_region.data_end_row + 1)):
+                val = ws_temp.cell(r, src_prod_col.index).value
+                if val and str(val).strip():
+                    sample_product = str(val).strip()
+                    break
+            wb_temp.close()
+
+        # Step 4: Generate Semantic Schema Mapping adhering to Rules 1-4
+        mappings = self.schema_mapper.generate_mapping(src_region, dest_region, sample_source_product=sample_product)
         unmapped = getattr(self.schema_mapper, "last_unmapped_columns", [])
-        ambiguities = getattr(self.schema_mapper, "last_ambiguities", [])
+        ambiguities = list(getattr(self.schema_mapper, "last_ambiguities", []))
+        prod_norm_details = getattr(self.schema_mapper, "last_product_normalization_details", {})
+
+        # RULE 1 Validation: Check for incomplete / missing data in Accounts Verified section
+        verified_mappings = [m for m in mappings if m.is_verified_source]
+        if verified_mappings:
+            wb_chk = openpyxl.load_workbook(source_filepath, data_only=True)
+            ws_chk = wb_chk[src_region.sheet_name]
+            for r in range(src_region.data_start_row, src_region.data_end_row + 1):
+                for vm in verified_mappings:
+                    cell_val = ws_chk.cell(r, vm.source_index).value
+                    if cell_val is None or str(cell_val).strip() == "":
+                        cell_ref = f"{openpyxl.utils.get_column_letter(vm.source_index)}{r}"
+                        ambiguities.append(
+                            f"Row {r}: Accounts Verified field '{vm.source_column}' (cell {cell_ref}) is empty/incomplete. Human approval required (never silently falling back to claimed data)."
+                        )
+            wb_chk.close()
+
+        # RULE 3 Observation: Inspect columns T & U in destination table
+        mirror_obs: Dict[str, str] = {}
+        for letter in ("T", "U"):
+            col_obj = next((c for c in dest_region.columns if c.column_letter == letter), None)
+            if col_obj:
+                role_desc = "Formulas" if col_obj.role == ColumnRole.CALCULATED_FORMULA else "Unwritten input slots (preserved per Rule 3)"
+                mirror_obs[letter] = f"Column {letter} ('{col_obj.name}'): {role_desc}. Retained unchanged."
+            else:
+                mirror_obs[letter] = f"Column {letter}: Not present in destination table."
 
         audit_logs.append(ExecutionStepLog(
             step_number=3,
@@ -131,7 +177,9 @@ class ExcelOrchestrator:
             details={
                 "mapped_columns": [m.model_dump() for m in mappings],
                 "unmapped_source_columns": unmapped,
-                "ambiguities": ambiguities
+                "ambiguities": ambiguities,
+                "product_normalization": prod_norm_details,
+                "mirror_columns_observation": mirror_obs
             }
         ))
 
@@ -142,7 +190,7 @@ class ExcelOrchestrator:
             else (dest_region.data_end_row + 1)
         )
 
-        has_unresolved_issues = bool(ambiguities) or best_proposal.requires_human_approval
+        has_unresolved_issues = bool(ambiguities) or best_proposal.requires_human_approval or prod_norm_details.get("is_ambiguous", False)
 
         plan = MappingPlan(
             plan_id=task_id,
@@ -157,7 +205,9 @@ class ExcelOrchestrator:
             requires_approval=has_unresolved_issues or (self.execution_mode != ExecutionMode.AUTONOMOUS),
             status=TaskStatus.AWAITING_APPROVAL if has_unresolved_issues else TaskStatus.PENDING,
             unmapped_source_columns=unmapped,
-            ambiguities=ambiguities
+            ambiguities=ambiguities,
+            product_normalization_details=prod_norm_details,
+            mirror_columns_observation=mirror_obs
         )
 
         return plan, best_proposal, audit_logs

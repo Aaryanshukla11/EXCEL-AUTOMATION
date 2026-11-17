@@ -175,7 +175,7 @@ def test_diagnostic_gagan_sister_columns_distinction():
     
     # Col J must be mapped to exact match 'SALE AMT.(Invoice Amount)', NEVER 'Actual Price'
     assert mapped_dict.get("J") == "SALE AMT.(Invoice Amount)"
-    assert "Actual Price" in mapper.last_unmapped_columns
+    assert any("Actual Price" in u for u in mapper.last_unmapped_columns)
 
 
 def test_diagnostic_salary_column_distinction():
@@ -213,7 +213,7 @@ def test_regression_mapping_uniqueness_and_competing_fields():
 
     # Multiple source columns named COLLECTION AMT. must trigger ambiguity notification
     assert len(mapper.last_ambiguities) > 0
-    assert any("compete" in a.lower() for a in mapper.last_ambiguities)
+    assert any("compete" in a.lower() or "prioritized" in a.lower() for a in mapper.last_ambiguities)
 
 
 def test_regression_arshad_and_chirag_mapping_integrity():

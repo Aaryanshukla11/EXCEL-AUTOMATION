@@ -261,7 +261,19 @@ class WorkbookInspector:
         candidate_rows.sort(key=lambda x: (x[1], x[2]), reverse=True)
         header_row = candidate_rows[0][0]
 
-        # 2. Extract Columns
+        # 2. Extract Columns and Detect Surrounding Section Headers (e.g. ACCOUNTS VERIFIED)
+        section_markers: Dict[int, str] = {}
+        for r_sec in range(max(1, header_row - 2), header_row):
+            if r_sec in rows:
+                for c_idx, (val, _) in rows[r_sec].items():
+                    if val and isinstance(val, str):
+                        val_clean = val.strip()
+                        val_lower = val_clean.lower()
+                        if any(k in val_lower for k in ("verified", "accounts verified", "audit", "claimed", "counsellor")):
+                            section_markers[c_idx] = val_clean
+
+        sorted_sec_col_indices = sorted(section_markers.keys())
+
         columns = []
         header_cells = rows.get(header_row, {})
         for c_idx in sorted(header_cells.keys()):
@@ -270,6 +282,16 @@ class WorkbookInspector:
                 name = str(val).strip()
                 col_letter = get_column_letter(c_idx)
                 norm_name = re.sub(r'[^a-zA-Z0-9]', '_', name.lower()).strip('_')
+
+                # Determine section membership
+                current_section = None
+                applicable_markers = [s_idx for s_idx in sorted_sec_col_indices if s_idx <= c_idx]
+                if applicable_markers:
+                    current_section = section_markers[applicable_markers[-1]]
+                else:
+                    current_section = "CLAIMED" if sorted_sec_col_indices else None
+
+                is_verified = bool(current_section and any(k in current_section.lower() for k in ("verified", "accounts verified", "audit")))
 
                 sample_formula = None
                 has_formula = False
@@ -293,6 +315,8 @@ class WorkbookInspector:
                     role=role,
                     sample_formula=sample_formula,
                     has_formula_slots=has_formula,
+                    section=current_section,
+                    is_verified_section=is_verified
                 ))
 
         # 3. Discover Data Boundaries, Preallocated Slots, and Totals Anchor
@@ -423,3 +447,104 @@ class WorkbookInspector:
                     })
 
         return linkages
+
+    def discover_product_lookup_grid(self, lookup_sheet_name: str = "Incentive Plan") -> Dict[str, float]:
+        """Dynamically inspects the product lookup grid from the workbook (e.g. Incentive Plan sheet).
+        
+        Discovers the lookup table columns (e.g. Product Name -> Advance Collection Target)
+        without hardcoding specific product names, column letters, or row positions.
+        """
+        sheet_names = self.get_sheet_names()
+        target_sheet = None
+        for s in sheet_names:
+            if s.lower() == lookup_sheet_name.lower():
+                target_sheet = s
+                break
+        if not target_sheet:
+            for s in sheet_names:
+                if "plan" in s.lower() or "slab" in s.lower():
+                    target_sheet = s
+                    break
+
+        if not target_sheet:
+            return {}
+
+        sheet_path = self.get_sheet_target_path(target_sheet)
+        with zipfile.ZipFile(self.filepath, 'r') as z:
+            sheet_bytes = z.read(sheet_path)
+            shared_strings = []
+            if 'xl/sharedStrings.xml' in z.namelist():
+                ss_root = ET.fromstring(z.read('xl/sharedStrings.xml'))
+                for si in ss_root.findall(f"{{{NS['main']}}}si"):
+                    shared_strings.append(''.join(t.text for t in si.findall(f".//{{{NS['main']}}}t") if t.text))
+
+        root = ET.fromstring(sheet_bytes)
+        sheet_data = root.find(f"{{{NS['main']}}}sheetData")
+
+        rows: Dict[int, Dict[int, Tuple[Optional[str], Optional[str]]]] = {}
+        for row_elem in sheet_data.findall(f"{{{NS['main']}}}row"):
+            r_idx = int(row_elem.attrib.get('r', 0))
+            cells = {}
+            for c_elem in row_elem.findall(f"{{{NS['main']}}}c"):
+                ref = c_elem.attrib.get('r', '')
+                col_match = re.match(r'([A-Z]+)(\d+)', ref)
+                if not col_match:
+                    continue
+                col_letters = col_match.group(1)
+                c_idx = 0
+                for char in col_letters:
+                    c_idx = c_idx * 26 + (ord(char) - ord('A') + 1)
+
+                t = c_elem.attrib.get('t')
+                v_el = c_elem.find(f"{{{NS['main']}}}v")
+                f_el = c_elem.find(f"{{{NS['main']}}}f")
+                is_el = c_elem.find(f"{{{NS['main']}}}is")
+
+                val = None
+                if is_el is not None:
+                    t_el = is_el.find(f"{{{NS['main']}}}t")
+                    val = t_el.text if t_el is not None else None
+                elif v_el is not None:
+                    val = v_el.text
+                    if t == 's' and val is not None and int(val) < len(shared_strings):
+                        val = shared_strings[int(val)]
+
+                formula = f_el.text if f_el is not None else None
+                cells[c_idx] = (val, formula)
+            rows[r_idx] = cells
+
+        product_grid: Dict[str, float] = {}
+        candidates = []
+
+        for r in range(1, 15):
+            if r not in rows:
+                continue
+            for c_idx, (val, _) in rows[r].items():
+                if val and isinstance(val, str) and "product" in val.lower():
+                    next_c = c_idx + 1
+                    if next_c in rows[r]:
+                        next_val = str(rows[r][next_c][0] or "").lower()
+                        score = 0
+                        if "advance" in next_val:
+                            score += 10
+                        if any(k in next_val for k in ("target", "traget", "rate", "percent", "grid")):
+                            score += 5
+                        if score > 0:
+                            candidates.append((score, r + 1, c_idx, next_c))
+
+        candidates.sort(key=lambda x: x[0], reverse=True)
+
+        if candidates:
+            _, grid_start_row, prod_col_idx, rate_col_idx = candidates[0]
+            for r in range(grid_start_row, grid_start_row + 25):
+                if r in rows and prod_col_idx in rows[r]:
+                    p_name, _ = rows[r][prod_col_idx]
+                    rate_val, _ = rows[r].get(rate_col_idx, (None, None))
+                    if p_name and isinstance(p_name, str) and p_name.strip():
+                        try:
+                            rate_float = float(rate_val) if rate_val is not None else 0.0
+                        except ValueError:
+                            rate_float = 0.0
+                        product_grid[p_name.strip()] = rate_float
+
+        return product_grid
