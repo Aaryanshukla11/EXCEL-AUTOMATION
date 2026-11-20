@@ -46,6 +46,11 @@ def main():
         action="store_true",
         help="Automatically approve proposed mappings without interactive prompt"
     )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Run analysis, matching, schema mapping and row-level approval in read-only preview mode (stops before write)"
+    )
     args = parser.parse_args()
 
     if not os.path.exists(args.sister):
@@ -118,6 +123,33 @@ def main():
     print(f"  Available Pre-allocated Empty Slots: {len(plan.destination_region.available_empty_slots)} rows")
     print(f"  Empty Slot Row Indices:             {plan.destination_region.available_empty_slots[:10]}")
     print(f"  Records to Transfer:                {plan.rows_to_transfer} rows")
+
+    if plan.batch_summary:
+        bs = plan.batch_summary
+        print(f"\n--- ROW-LEVEL APPROVAL & ELIGIBILITY BREAKDOWN ---")
+        print(f"  Batch Decision:          {bs.batch_status.value.upper()}")
+        print(f"  Total Evaluated:         {bs.total_rows} rows")
+        print(f"  Eligible Records:        {bs.eligible_rows_count}")
+        print(f"  Held Records:            {bs.held_rows_count}")
+        print(f"  Needs Approval:          {bs.needs_approval_count}")
+        if bs.partial_batch_warning:
+            print(f"  [!] PARTIAL BATCH WARNING: Contains held rows requiring human override.")
+
+        print(f"\n  {'Status':<16} {'Row':<8} {'Entity / Candidate':<28} {'Slot Assignment'}")
+        print("  " + "-" * 75)
+        for r_rec in bs.row_records:
+            icon = f"[{r_rec.status.value.upper()}]"
+            slot_str = f"-> Slot Row {r_rec.proposed_destination_row}" if r_rec.proposed_destination_row else "-> NO WRITE (HELD)"
+            print(f"  {icon:<16} R{r_rec.source_row_index:<7} {r_rec.entity_identity[:26]:<28} {slot_str}")
+            if r_rec.status_reason:
+                print(f"      Reason: {r_rec.status_reason}")
+            if r_rec.normalized_product:
+                print(f"      Product Normalization: '{r_rec.normalized_product}'")
+
+    if args.dry_run:
+        print(format_header("DRY RUN COMPLETE — READ-ONLY PREVIEW"))
+        print("Analysis completed successfully. No cells were modified.")
+        sys.exit(0)
 
     # ----------------------------------------------------
     # APPROVAL GATE
