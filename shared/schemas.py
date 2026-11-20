@@ -5,10 +5,12 @@ from pydantic import BaseModel, Field
 
 from shared.enums import (
     AuditAction,
+    BatchStatus,
     ColumnRole,
     ExecutionMode,
     MatchConfidenceLevel,
     TaskStatus,
+    TransactionStatus,
 )
 
 
@@ -89,6 +91,31 @@ class ExecutionStepLog(BaseModel):
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+class RowTransactionRecord(BaseModel):
+    source_row_index: int
+    entity_identity: str
+    status: TransactionStatus
+    status_reason: Optional[str] = None
+    verified_fields_present: Dict[str, Any] = Field(default_factory=dict)
+    missing_verified_fields: List[str] = Field(default_factory=list)
+    proposed_destination_row: Optional[int] = None
+    proposed_cell_values: Dict[str, Any] = Field(default_factory=dict)
+    normalized_product: Optional[str] = None
+    claimed_fields_observed: Dict[str, Any] = Field(default_factory=dict)
+
+
+class BatchApprovalSummary(BaseModel):
+    batch_status: BatchStatus
+    total_rows: int
+    eligible_rows_count: int
+    held_rows_count: int
+    needs_approval_count: int = 0
+    rejected_count: int = 0
+    partial_batch_warning: bool = False
+    requires_explicit_approval: bool = False
+    row_records: List[RowTransactionRecord] = Field(default_factory=list)
+
+
 class MappingPlan(BaseModel):
     plan_id: str
     source_filename: str
@@ -105,6 +132,8 @@ class MappingPlan(BaseModel):
     ambiguities: List[str] = Field(default_factory=list)
     product_normalization_details: Dict[str, Any] = Field(default_factory=dict)
     mirror_columns_observation: Dict[str, str] = Field(default_factory=dict)
+    batch_summary: Optional[BatchApprovalSummary] = None
+
 
 
 class ValidationResult(BaseModel):

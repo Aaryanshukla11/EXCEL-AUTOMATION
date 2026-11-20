@@ -19,6 +19,21 @@ class TaskStatus(str, Enum):
     ROLLED_BACK = "rolled_back"
 
 
+class TransactionStatus(str, Enum):
+    ELIGIBLE = "eligible"
+    HOLD = "hold"
+    REJECTED = "rejected"
+    NEEDS_APPROVAL = "needs_approval"
+
+
+class BatchStatus(str, Enum):
+    ALL_ELIGIBLE = "all_eligible"
+    PARTIAL_ELIGIBLE = "partial_eligible"
+    ALL_HOLD = "all_hold"
+    REQUIRES_SELECTION = "requires_selection"
+
+
+
 class MatchConfidenceLevel(str, Enum):
     HIGH = "high"        # >= 0.90
     MEDIUM = "medium"    # >= 0.70 and < 0.90

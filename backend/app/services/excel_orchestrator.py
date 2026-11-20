@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import openpyxl
 
 from excel_engine.analyzers.workbook_inspector import WorkbookInspector
+from excel_engine.analyzers.row_approval_engine import RowApprovalEngine
 from excel_engine.mappers.entity_matcher import EntityMatcher
 from excel_engine.mappers.schema_mapper import SchemaMapper
 from excel_engine.mappers.product_normalizer import ProductNormalizer
@@ -190,7 +191,25 @@ class ExcelOrchestrator:
             else (dest_region.data_end_row + 1)
         )
 
-        has_unresolved_issues = bool(ambiguities) or best_proposal.requires_human_approval or prod_norm_details.get("is_ambiguous", False)
+        # Phase 1: Row-Level Approval Engine
+        row_approval_engine = RowApprovalEngine(product_normalizer=self.schema_mapper.product_normalizer)
+        batch_summary = row_approval_engine.evaluate_batch(
+            source_filepath=source_filepath,
+            source_region=src_region,
+            destination_region=dest_region,
+            column_mappings=mappings,
+            target_sheet_name=best_proposal.candidate_sheet_name,
+            master_sheet_exists=True,
+        )
+
+        has_unresolved_issues = (
+            bool(ambiguities)
+            or best_proposal.requires_human_approval
+            or prod_norm_details.get("is_ambiguous", False)
+            or batch_summary.partial_batch_warning
+            or batch_summary.held_rows_count > 0
+            or batch_summary.requires_explicit_approval
+        )
 
         plan = MappingPlan(
             plan_id=task_id,
@@ -200,14 +219,15 @@ class ExcelOrchestrator:
             source_region=src_region,
             destination_region=dest_region,
             column_mappings=mappings,
-            rows_to_transfer=src_region.data_end_row - src_region.data_start_row + 1,
+            rows_to_transfer=batch_summary.eligible_rows_count if batch_summary.eligible_rows_count > 0 else (src_region.data_end_row - src_region.data_start_row + 1),
             target_start_row=target_start_row,
             requires_approval=has_unresolved_issues or (self.execution_mode != ExecutionMode.AUTONOMOUS),
             status=TaskStatus.AWAITING_APPROVAL if has_unresolved_issues else TaskStatus.PENDING,
             unmapped_source_columns=unmapped,
             ambiguities=ambiguities,
             product_normalization_details=prod_norm_details,
-            mirror_columns_observation=mirror_obs
+            mirror_columns_observation=mirror_obs,
+            batch_summary=batch_summary,
         )
 
         return plan, best_proposal, audit_logs
