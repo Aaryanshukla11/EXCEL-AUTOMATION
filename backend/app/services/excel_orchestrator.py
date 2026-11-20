@@ -269,7 +269,8 @@ class ExcelOrchestrator:
             target_sheet_xml_path=target_xml_path,
             source_region=plan.source_region,
             destination_region=plan.destination_region,
-            mappings=plan.column_mappings
+            mappings=plan.column_mappings,
+            batch_summary=plan.batch_summary,
         )
         audit_logs.extend(exec_logs)
         step_idx += len(exec_logs)
